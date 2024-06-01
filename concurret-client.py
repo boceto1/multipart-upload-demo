@@ -2,13 +2,14 @@ import boto3
 from botocore.client import Config
 import os
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuration
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION")
 AWS_BUCKET = os.getenv("AWS_BUCKET")
-FILE_PATH = '/Users/jeankarlo/Desktop/final4.mp4'
+FILE_PATH = '/Users/jeankarlo/Desktop/final5.mp4'
 CHUNK_SIZE = 5 * 1024 * 1024  # 5MB
 
 # Initialize S3 client
@@ -37,9 +38,11 @@ def generate_presigned_url(bucket_name, file_key, upload_id, part_number, expira
 
 def upload_part(presigned_url, data):
     response = requests.put(presigned_url, data=data)
-    return response
+    response.raise_for_status()  # Raise an HTTPError if the HTTP request returned an unsuccessful status code
+    return response.headers['ETag']
 
 def complete_multipart_upload(bucket_name, file_key, upload_id, parts):
+    parts = sorted(parts, key=lambda x: x['PartNumber']) #Super important
     response = s3_client.complete_multipart_upload(
         Bucket=bucket_name,
         Key=file_key,
@@ -56,26 +59,28 @@ def main():
     parts = []
 
     part_number = 1
-    with open(FILE_PATH, 'rb') as f:
-        while True:
-            print(f"Creating part: {part_number}")
-            data = f.read(CHUNK_SIZE)
-            if not data:
-                break
-            
-            presigned_url = generate_presigned_url(AWS_BUCKET, file_key, upload_id, part_number)
-            print(f"presigned_url: {presigned_url} ,{part_number}")
-            response = upload_part(presigned_url, data)
-            print(f"Upload chunck: {presigned_url} ,{part_number}")
-            
-            if response.status_code != 200:
-                print(f"Failed to upload part {part_number}")
-                return
-            
-            etag = response.headers['ETag']
-            parts.append({'PartNumber': part_number, 'ETag': etag})
-            print(f"Finish to upload: {presigned_url} ,{part_number}")
-            part_number += 1
+    futures = []
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+      with open(FILE_PATH, 'rb') as f:
+          while True:
+              print(f"Creating part: {part_number}")
+              data = f.read(CHUNK_SIZE)
+              if not data:
+                  break
+                
+              presigned_url = generate_presigned_url(AWS_BUCKET, file_key, upload_id, part_number)
+              futures.append(executor.submit(upload_part, presigned_url, data))
+              part_number += 1
+
+      for future in as_completed(futures):
+        try:
+            print(f"Part was created: {futures.index(future) + 1}")
+            etag = future.result()
+            parts.append({'PartNumber': futures.index(future) + 1, 'ETag': etag})
+        except Exception as exc:
+                print(f'Part upload generated an exception: {exc}')
+
     
     print(f"Complete to create video: {len(parts)}")
     complete_response = complete_multipart_upload(AWS_BUCKET, file_key, upload_id, parts)
