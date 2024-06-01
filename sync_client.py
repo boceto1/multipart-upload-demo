@@ -3,6 +3,7 @@ from botocore.client import Config
 import os
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 # Configuration
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -42,7 +43,6 @@ def upload_part(presigned_url, data):
     return response.headers['ETag']
 
 def complete_multipart_upload(bucket_name, file_key, upload_id, parts):
-    parts = sorted(parts, key=lambda x: x['PartNumber']) #Super important
     response = s3_client.complete_multipart_upload(
         Bucket=bucket_name,
         Key=file_key,
@@ -52,40 +52,38 @@ def complete_multipart_upload(bucket_name, file_key, upload_id, parts):
     return response
 
 def main():
-    print("Start to upload video")
+    start_time = time.time()  # Start timing
     file_key = os.path.basename(FILE_PATH)
     upload_id = create_multipart_upload(AWS_BUCKET, file_key)
-    print(f"I created multipart upload: {upload_id}")
     parts = []
 
     part_number = 1
-    futures = []
-
-    with ThreadPoolExecutor(max_workers=5) as executor:
-      with open(FILE_PATH, 'rb') as f:
-          while True:
-              print(f"Creating part: {part_number}")
-              data = f.read(CHUNK_SIZE)
-              if not data:
-                  break
-                
-              presigned_url = generate_presigned_url(AWS_BUCKET, file_key, upload_id, part_number)
-              futures.append(executor.submit(upload_part, presigned_url, data))
-              part_number += 1
-
-      for future in as_completed(futures):
-        try:
-            print(f"Part was created: {futures.index(future) + 1}")
-            etag = future.result()
-            parts.append({'PartNumber': futures.index(future) + 1, 'ETag': etag})
-        except Exception as exc:
-                print(f'Part upload generated an exception: {exc}')
+    with open(FILE_PATH, 'rb') as f:
+        while True:
+            print(f"Generating part {part_number}")
+            data = f.read(CHUNK_SIZE)
+            if not data:
+                break
+            
+            presigned_url = generate_presigned_url(AWS_BUCKET, file_key, upload_id, part_number)
+            
+            etag = upload_part(presigned_url, data)
+            parts.append({'PartNumber': part_number, 'ETag': etag})
+            part_number += 1
+            print(f"Part was generated {part_number}")
+    
+    complete_response = complete_multipart_upload(AWS_BUCKET, file_key, upload_id, parts)
+    print(complete_response)
 
     
     print(f"Complete to create video: {len(parts)}")
     complete_response = complete_multipart_upload(AWS_BUCKET, file_key, upload_id, parts)
     print(f"Just the end: {len(parts)}")
     print(complete_response)
+
+    end_time = time.time()  # End timing
+    duration = end_time - start_time
+    print(f"Multipart upload completed in {duration:.2f} seconds")
 
 if __name__ == '__main__':
     main()
